@@ -3,6 +3,7 @@ HOPEFX Machine Learning Pipeline
 LSTM, XGBoost, Random Forest with model saving/loading, hyperparameter tuning, evaluation
 """
 
+import logging
 import pandas as pd
 import numpy as np
 from datetime import datetime
@@ -57,7 +58,7 @@ class FeatureEngineer:
         df: pd.DataFrame,
         target_col: str = 'close',
         prediction_horizon: int = 1,
-        lookback_window: int = 20
+        lookback_window: int = 10
     ) -> Tuple[pd.DataFrame, pd.Series]:
         """
         Create feature matrix and target vector
@@ -435,7 +436,7 @@ class XGBoostModel:
                 'subsample': 0.8,
                 'colsample_bytree': 0.8,
                 'random_state': 42,
-                'use_label_encoder': False
+                'early_stopping_rounds': 10
             }
         else:
             return {
@@ -477,7 +478,6 @@ class XGBoostModel:
         self.model.fit(
             X_train, y_train,
             eval_set=eval_set,
-            early_stopping_rounds=early_stopping_rounds if len(eval_set) > 1 else None,
             verbose=False
         )
         
@@ -1047,6 +1047,14 @@ def train_ml_pipeline(
     X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
     y_train_class, y_test_class = y_class.iloc[:split_idx], y_class.iloc[split_idx:]
     y_train_reg, y_test_reg = y_reg.iloc[:split_idx], y_reg.iloc[split_idx:]
+    
+    if len(X_train) == 0 or len(X_test) == 0:
+        logging.warning(
+            "Insufficient data after feature engineering: "
+            f"X_train shape={X_train.shape}, X_test shape={X_test.shape}. "
+            "Skipping training for this symbol."
+        )
+        return {}
     
     # Scale features
     X_train_scaled, X_test_scaled = fe.scale_features(X_train, X_test)

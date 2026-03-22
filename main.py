@@ -2,6 +2,11 @@
 """
 HOPEFX AI Trading Framework - COMPLETE PRODUCTION SYSTEM
 All components integrated and wired together
+
+Entry Point: Standard paper/live trading production run.
+Use this file for day-to-day trading operations.
+For first-time setup run ``quickstart.py`` first.
+See README_ENTRYPOINTS.md for a full comparison of all entry points.
 """
 
 import argparse

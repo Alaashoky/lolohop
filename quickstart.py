@@ -1,4 +1,8 @@
 # File 19: Create a quickstart script for one-command setup
+# Entry Point: First-time setup and demo runner.
+# Run ``python quickstart.py`` right after cloning to install dependencies,
+# configure the environment and verify everything works.
+# See README_ENTRYPOINTS.md for a full comparison of all entry points.
 
 quickstart_content = '''#!/usr/bin/env python3
 """

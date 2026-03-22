@@ -3,6 +3,11 @@
 HOPEFX ULTIMATE INTEGRATED EDITION v3.0
 The World's Most Advanced AI Trading System
 
+Entry Point: GPU-accelerated institutional deployment with CUDA inference,
+Monte-Carlo risk engine, GARCH volatility, cross-exchange arbitrage and
+distributed multi-node support.  Requires a CUDA-capable GPU.
+See README_ENTRYPOINTS.md for a full comparison of all entry points.
+
 Features:
 - Master Control Core with Event Bus (1M+ events/sec)
 - Strategy Orchestra (multi-strategy coordination)

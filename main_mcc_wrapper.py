@@ -2,6 +2,11 @@
 """
 Wrapper that integrates MCC with your existing HOPEFX main.py
 WITHOUT breaking anything.
+
+Entry Point: Thin wrapper to add Master Control Core capabilities to an
+existing setup.  Import ``main_with_mcc`` and call it instead of your
+current ``main()`` function.
+See README_ENTRYPOINTS.md for a full comparison of all entry points.
 """
 
 from core.mcc.master_control import MasterControlCore, MCCConfig

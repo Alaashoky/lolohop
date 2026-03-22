@@ -2,6 +2,10 @@
 """
 HOPEFX Ultimate Edition v2.0
 Master Control Core with Strategy Orchestra
+
+Entry Point: Multi-strategy setup using the MCC event bus and Strategy
+Orchestra.  Extends ``main.py`` with coordinated concurrent strategies.
+See README_ENTRYPOINTS.md for a full comparison of all entry points.
 """
 
 import asyncio

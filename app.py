@@ -2,6 +2,12 @@
 """
 HOPEFX AI Trading Framework - API Server
 
+Entry Point: REST API server (FastAPI/uvicorn).  Start this to expose
+trading operations, market data, portfolio management, backtesting and
+system health-check endpoints over HTTP.
+API docs available at http://localhost:5000/docs once running.
+See README_ENTRYPOINTS.md for a full comparison of all entry points.
+
 FastAPI-based REST API server for the trading framework.
 Provides endpoints for:
 - Trading operations

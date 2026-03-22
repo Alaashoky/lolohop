@@ -151,15 +151,23 @@ python cli.py status
 ### Run
 
 ```bash
-# Run main application
+# Run main application (standard paper/live trading)
 python main.py
 
-# Or start API server
+# Or start API server (REST endpoints + web dashboard)
 python app.py  # Access docs at http://localhost:5000/docs
 
 # Or use CLI
 python cli.py --help
+
+# First time? Run the quickstart helper:
+python quickstart.py
 ```
+
+> **Which entry point should I use?**
+> See [README_ENTRYPOINTS.md](./README_ENTRYPOINTS.md) for a full comparison
+> of all entry-point files (`main.py`, `app.py`, `main_ultimate.py`,
+> `main_ultimate_integrated.py`, `main_mcc_wrapper.py`, `quickstart.py`).
 
 See [INSTALLATION.md](./INSTALLATION.md) for detailed setup instructions.
 

@@ -1399,12 +1399,17 @@ class EnhancedBacktestEngine:
         
         # Calculate execution price with slippage
         is_buy = order['side'] == OrderSide.BUY
-        
+
+        # Initialize defaults so they are always defined before use below
+        volatility = self.microstructure.realized_variance ** 0.5 if self.microstructure.realized_variance > 0 else 0.001
+        participation = abs(size) / max(tick.volume, 1000)
+        latency = self.latency_model['mean']
+
         if order['type'] == 'market':
             # Market order: immediate fill at market + slippage
             base_price = tick.ask if is_buy else tick.bid
             
-            # Calculate slippage
+            # Recalculate with live tick data
             volatility = self.microstructure.realized_variance ** 0.5 if self.microstructure.realized_variance > 0 else 0.001
             participation = abs(size) / max(tick.volume, 1000)
             
@@ -1424,7 +1429,7 @@ class EnhancedBacktestEngine:
                 self.latency_model['mean'],
                 self.latency_model['std']
             )
-            
+
         elif order['type'] == 'limit' and order['limit_price']:
             # Check if limit is marketable
             if is_buy and order['limit_price'] < tick.ask:
@@ -1527,6 +1532,7 @@ class EnhancedBacktestEngine:
             'slippage_bps': slippage_bps,
             'costs': costs,
             'latency_sec': latency,
+            'latency_ms': latency * 1000,
             'regime': self.microstructure.current_regime.name
         })
         
@@ -2011,6 +2017,17 @@ def run_comprehensive_backtest():
         if i % 1000 == 0:
             print(f"    Processed {i}/{len(ticks)} ticks | Equity: ${engine.capital:,.2f}")
     
+    # Force-close any remaining open position at end of backtest
+    if position != 0:
+        close_side = OrderSide.SELL if position > 0 else OrderSide.BUY
+        success, order_id = engine.submit_order(
+            "XAUUSD", close_side, abs(position), 'market',
+            strategy_id="ma_crossover"
+        )
+        if success:
+            engine.execute_order(order_id, ticks[-1])
+        position = 0
+
     # Generate report
     print("\n[4] Generating performance report...")
     report = engine.get_performance_report()

@@ -221,8 +221,6 @@ class PaperTradingBroker(BrokerConnector):
             if o.status in (OrderStatus.PENDING, OrderStatus.OPEN)
         ]
 
-
-
     def close_position(self, symbol_or_id: str) -> bool:
         """Close a position by symbol or position id."""
         symbol = symbol_or_id
@@ -269,7 +267,6 @@ class PaperTradingBroker(BrokerConnector):
             return
         try:
             from database.models import Trade, OrderSide, TradeStatus
-            # Normalise side to OrderSide enum
             raw_side = str(position.side).lower().replace("orderside.", "").replace("long", "buy").replace("short", "sell")
             side_enum = OrderSide.BUY if "buy" in raw_side or "long" in raw_side else OrderSide.SELL
 
@@ -342,17 +339,14 @@ class PaperTradingBroker(BrokerConnector):
         timeframe: str = "1h",
         limit: int = 100
     ) -> List[Dict[str, Any]]:
-        """
-        Get simulated market data.
+        """Get simulated market data.
 
         Returns simple OHLCV data for testing.
         """
         current_price = self.market_prices.get(symbol, 1000.0)
 
-        # Generate dummy OHLCV data
         data = []
         for i in range(limit):
-            # Simple price variation
             price = current_price * (1 + (i % 10 - 5) / 100)
             data.append({
                 'timestamp': datetime.now(timezone.utc).isoformat(),
@@ -366,25 +360,11 @@ class PaperTradingBroker(BrokerConnector):
         return data
 
     def get_market_price(self, symbol: str) -> float:
-        """
-        Get current market price for a symbol.
-
-        Args:
-            symbol: Trading symbol
-
-        Returns:
-            Current market price
-        """
+        """Get current market price for a symbol."""
         return self.market_prices.get(symbol, 0.0)
 
     def update_market_price(self, symbol: str, price: float):
-        """
-        Update simulated market price.
-
-        Args:
-            symbol: Trading symbol
-            price: New price
-        """
+        """Update simulated market price."""
         self.market_prices[symbol] = price
         logger.debug(f"Updated {symbol} price to ${price}")
 
@@ -399,20 +379,15 @@ class PaperTradingBroker(BrokerConnector):
         position_side = "LONG" if side == OrderSide.BUY else "SHORT"
 
         if symbol in self.positions:
-            # Update existing position
             position = self.positions[symbol]
-
-            # For simplicity, assume same side
             total_quantity = position.quantity + quantity
             avg_price = (
                 (position.entry_price * position.quantity + price * quantity) /
                 total_quantity
             )
-
             position.quantity = total_quantity
             position.entry_price = avg_price
         else:
-            # Create new position
             self.positions[symbol] = Position(
                 symbol=symbol,
                 side=position_side,

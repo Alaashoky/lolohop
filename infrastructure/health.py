@@ -4,6 +4,7 @@ Comprehensive health monitoring with dependency checks
 """
 
 import asyncio
+import logging
 import time
 import psutil
 import os
@@ -12,6 +13,8 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from enum import Enum
 import json
+
+logger = logging.getLogger(__name__)
 
 try:
     from aiohttp import web
@@ -56,7 +59,7 @@ class SystemHealth:
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     version: str = "2.1.0"
     uptime_seconds: float = 0.0
-    hostname: str = field(default_factory=lambda: os.uname().nodename)
+    hostname: str = field(default_factory=lambda: os.environ.get('COMPUTERNAME', os.environ.get('HOSTNAME', 'unknown')))
     
     def to_dict(self) -> Dict:
         return {

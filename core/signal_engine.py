@@ -23,6 +23,17 @@ _SYMBOLS = os.getenv("SIGNAL_ENGINE_SYMBOLS", "XAUUSD").split(",")
 _INTERVAL_SECONDS = int(os.getenv("SIGNAL_ENGINE_INTERVAL", "60"))
 _AUTO_TRADE = os.getenv("SIGNAL_ENGINE_AUTO_TRADE", "false").lower() == "true"
 
+def _flatten_df_columns(df):
+    """
+yfinance >= 0.2.38 returns a MultiIndex column DataFrame when downloading
+a single ticker (columns look like ("Close", "GC=F")).  Flatten them to
+plain string column names so the rest of the code works transparently.
+"""
+    import pandas as pd
+    if isinstance(df.columns, pd.MultiIndex):
+        # Keep only the first level (e.g. "Close", "Open", …)
+        df.columns = [col[0] for col in df.columns]
+    return df
 
 async def _fetch_market_data(symbol: str) -> Optional[dict]:
     """Fetch latest OHLCV bar from yfinance."""
@@ -41,6 +52,10 @@ async def _fetch_market_data(symbol: str) -> Optional[dict]:
         df = yf.download(ticker, period="5d", interval="1h", progress=False, auto_adjust=True)
         if df.empty:
             return None
+
+        # Normalise MultiIndex columns produced by yfinance >= 0.2.38
+        df = _flatten_df_columns(df)
+
         row = df.iloc[-1]
         prices = df["Close"].dropna().tolist()
         highs = df["High"].dropna().tolist()
@@ -63,7 +78,6 @@ async def _fetch_market_data(symbol: str) -> Optional[dict]:
         logger.warning("Market data fetch failed for %s: %s", symbol, exc)
         return None
 
-
 async def run_signal_engine(app_state: Any):
     """
     Main signal engine loop. Runs indefinitely until cancelled.
@@ -84,7 +98,6 @@ async def run_signal_engine(app_state: Any):
             logger.error("Signal engine tick error: %s", exc)
 
         await asyncio.sleep(_INTERVAL_SECONDS)
-
 
 async def _tick(app_state: Any):
     """Process one tick for all watched symbols."""

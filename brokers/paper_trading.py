@@ -210,9 +210,16 @@ class PaperTradingBroker(BrokerConnector):
             positions.append(position)
         return positions
 
-    def get_positions(self) -> List[Position]:
+    async def get_positions(self) -> List[Position]:
         """Get all open positions."""
         return self._get_positions_sync()
+
+    async def get_pending_orders(self) -> List[Order]:
+        """Get all pending/open orders."""
+        return [
+            o for o in self.orders.values()
+            if o.status in (OrderStatus.PENDING, OrderStatus.OPEN)
+        ]
 
 
 
@@ -303,7 +310,7 @@ class PaperTradingBroker(BrokerConnector):
             timestamp=datetime.now(timezone.utc),
         )
 
-    def get_account_info(self) -> "AccountInfo":
+    async def get_account_info(self) -> "AccountInfo":
         """Get account information."""
         return self._get_account_info_sync()
 

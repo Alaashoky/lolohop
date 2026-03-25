@@ -375,7 +375,7 @@ class Account(Base):
     leverage = Column(Float, nullable=True)
     snapshot_at = Column(DateTime, default=datetime.utcnow, index=True)
 
-    user = relationship("User", back_populates="accounts")
+    user = relationship("User", foreign_keys=[user_id])
     trades = relationship("Trade", back_populates="account", lazy="dynamic",
                           primaryjoin="Account.id == foreign(Trade.account_id)")
     orders = relationship("Order", back_populates="account", lazy="dynamic",
@@ -639,43 +639,6 @@ class MarketDataType(enum.Enum):
     DEPTH = "depth"
     NEWS = "news"
 
-
-# ── Proper SQLAlchemy models expected by tests ────────────────────────────────
-
-if SQLALCHEMY_AVAILABLE:
-    class User(Base):
-        __tablename__ = "users"
-        id = Column(Integer, primary_key=True)
-        username = Column(String(100), unique=True, nullable=False)
-        email = Column(String(255), unique=True, nullable=False)
-        password_hash = Column(String(255), nullable=False)
-        status = Column(String(50), default="active")
-        created_at = Column(DateTime, default=datetime.utcnow)
-        updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-        sessions = relationship("Session", back_populates="user", lazy="dynamic")
-        accounts = relationship("Account", back_populates="user", lazy="dynamic")
-
-    class Session(Base):
-        __tablename__ = "sessions"
-        id = Column(Integer, primary_key=True)
-        user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-        token = Column(String(512), unique=True, nullable=False)
-        expires_at = Column(DateTime, nullable=False)
-        created_at = Column(DateTime, default=datetime.utcnow)
-        user = relationship("User", back_populates="sessions")
-
-    # No relationship patches needed — Account.user_id is a string FK
-    # Trade/Order/Position already have account_id columns added above
-
-else:
-    # Stub models when SQLAlchemy not available
-    class User:
-        __tablename__ = "users"
-        __table__ = type("T", (), {"columns": []})()
-
-    class Session:
-        __tablename__ = "sessions"
-        __table__ = type("T", (), {"columns": []})()
 
 def _add_enum_value(enum_cls, name, value):
     """Add a new member to an existing Enum if it doesn't already exist."""

@@ -46,7 +46,7 @@ from core.analytics.realtime_heatmap import RealtimeHeatmapEngine
 # Existing HOPEFX components (your current code)
 from config.config_manager import initialize_config, ConfigManager
 from cache.market_data_cache import MarketDataCache
-from database.models import Base, Session, Trade, Position
+from database.models import Base, Trade, Position
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 

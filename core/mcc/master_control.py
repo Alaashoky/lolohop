@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
 from config.config_manager import ConfigManager
 from cache.market_data_cache import MarketDataCache
-from database.models import Session, Trade, Position
+from database.models import Trade, Position
 from strategies.base_enhanced import EnhancedStrategy, StrategySignal, StrategyAdapter
 
 

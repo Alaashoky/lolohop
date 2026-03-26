@@ -15,6 +15,8 @@ import joblib
 import warnings
 warnings.filterwarnings('ignore')
 
+logger = logging.getLogger(__name__)
+
 # sklearn imports
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.model_selection import GridSearchCV, RandomizedSearchCV, TimeSeriesSplit
@@ -45,161 +47,209 @@ except ImportError:
 
 
 class FeatureEngineer:
-    """Create features for ML models from OHLCV data"""
-    
+    """Create features from ALL 10 trading strategies for ML models"""
+
     def __init__(self, include_indicators: bool = True, include_lags: bool = True):
         self.include_indicators = include_indicators
         self.include_lags = include_lags
         self.scaler = StandardScaler()
         self.feature_names: List[str] = []
-    
+
     def create_features(
         self,
         df: pd.DataFrame,
         target_col: str = 'close',
         prediction_horizon: int = 1,
         lookback_window: int = 10
-    ) -> Tuple[pd.DataFrame, pd.Series]:
+    ) -> Tuple[pd.DataFrame, pd.Series, pd.Series, pd.DataFrame]:
         """
-        Create feature matrix and target vector
-        
+        Create feature matrix and target vectors from all 10 trading strategies.
+
         Returns:
             X: Feature DataFrame
-            y: Target Series (returns direction for classification, returns for regression)
+            y_class: Binary classification target (1 = price up, 0 = price down)
+            y_reg: Regression target (future returns)
+            data: Full processed DataFrame including features and targets
         """
         data = df.copy()
-        
-        # Price-based features
-        data['returns'] = data[target_col].pct_change()
-        data['log_returns'] = np.log(data[target_col] / data[target_col].shift(1))
-        
-        # Lag features
-        if self.include_lags:
-            for lag in range(1, lookback_window + 1):
-                data[f'{target_col}_lag_{lag}'] = data[target_col].shift(lag)
-                data[f'returns_lag_{lag}'] = data['returns'].shift(lag)
-        
-        # Technical indicators
-        if self.include_indicators:
-            # Moving averages
-            for window in [5, 10, 20, 50]:
-                data[f'sma_{window}'] = data[target_col].rolling(window=window).mean()
-                data[f'ema_{window}'] = data[target_col].ewm(span=window, adjust=False).mean()
-                data[f'dist_sma_{window}'] = (data[target_col] - data[f'sma_{window}']) / data[f'sma_{window}']
-            
-            # Volatility
-            data['atr_14'] = self._calculate_atr(data, 14)
-            data['volatility_20'] = data['returns'].rolling(window=20).std()
-            
-            # RSI
-            data['rsi_14'] = self._calculate_rsi(data[target_col], 14)
-            
-            # MACD
-            ema_fast = data[target_col].ewm(span=12, adjust=False).mean()
-            ema_slow = data[target_col].ewm(span=26, adjust=False).mean()
-            data['macd'] = ema_fast - ema_slow
-            data['macd_signal'] = data['macd'].ewm(span=9, adjust=False).mean()
-            data['macd_hist'] = data['macd'] - data['macd_signal']
-            
-            # Bollinger Bands
-            sma_20 = data[target_col].rolling(window=20).mean()
-            std_20 = data[target_col].rolling(window=20).std()
-            data['bb_upper'] = sma_20 + (std_20 * 2)
-            data['bb_lower'] = sma_20 - (std_20 * 2)
-            data['bb_position'] = (data[target_col] - data['bb_lower']) / (data['bb_upper'] - data['bb_lower'])
-            
-            # Volume features
-            if 'volume' in data.columns:
-                data['volume_sma_20'] = data['volume'].rolling(window=20).mean()
-                data['volume_ratio'] = data['volume'] / data['volume_sma_20']
-                data['obv'] = self._calculate_obv(data)
-        
-        # Target variable - future returns
+        c = data['close']
+        h = data['high']
+        l = data['low']
+        o = data['open']
+        v = data['volume']
+
+        # ── Strategy 1: MA Crossover ──────────────────────────────────────
+        for p in [5, 10, 20, 50, 100, 200]:
+            data[f'ma_{p}'] = c.rolling(p).mean()
+        data['sig_ma_5_20']   = np.where(data['ma_5']  > data['ma_20'],  1, -1)
+        data['sig_ma_10_50']  = np.where(data['ma_10'] > data['ma_50'],  1, -1)
+        data['sig_ma_50_200'] = np.where(data['ma_50'] > data['ma_200'], 1, -1)
+        data['ma_dist_5_20']  = (data['ma_5']  - data['ma_20'])  / (data['ma_20']  + 1e-9)
+        data['ma_dist_10_50'] = (data['ma_10'] - data['ma_50'])  / (data['ma_50']  + 1e-9)
+
+        # ── Strategy 2: EMA Crossover ─────────────────────────────────────
+        for p in [9, 21, 50, 100]:
+            data[f'ema_{p}'] = c.ewm(span=p, adjust=False).mean()
+        data['sig_ema_9_21']  = np.where(data['ema_9']  > data['ema_21'], 1, -1)
+        data['sig_ema_21_50'] = np.where(data['ema_21'] > data['ema_50'], 1, -1)
+        data['ema_dist_9_21'] = (data['ema_9'] - data['ema_21']) / (data['ema_21'] + 1e-9)
+
+        # ── Strategy 3: RSI (multiple periods) ───────────────────────────
+        for period in [7, 14, 21]:
+            delta = c.diff()
+            gain  = delta.clip(lower=0).rolling(period).mean()
+            loss  = (-delta.clip(upper=0)).rolling(period).mean()
+            data[f'rsi_{period}'] = 100 - (100 / (1 + gain / loss.replace(0, np.nan)))
+        data['sig_rsi']   = np.where(data['rsi_14'] < 30, 1,
+                             np.where(data['rsi_14'] > 70, -1, 0))
+        data['rsi_slope'] = data['rsi_14'].diff(3)
+
+        # ── Strategy 4: MACD ──────────────────────────────────────────────
+        ema12 = c.ewm(span=12, adjust=False).mean()
+        ema26 = c.ewm(span=26, adjust=False).mean()
+        data['macd']            = ema12 - ema26
+        data['macd_signal']     = data['macd'].ewm(span=9, adjust=False).mean()
+        data['macd_hist']       = data['macd'] - data['macd_signal']
+        data['sig_macd']        = np.where(data['macd'] > data['macd_signal'], 1, -1)
+        data['macd_hist_slope'] = data['macd_hist'].diff(2)
+
+        # ── Strategy 5: Bollinger Bands ───────────────────────────────────
+        bb_mid = c.rolling(20).mean()
+        bb_std = c.rolling(20).std()
+        data['bb_upper']   = bb_mid + 2 * bb_std
+        data['bb_lower']   = bb_mid - 2 * bb_std
+        data['bb_width']   = (data['bb_upper'] - data['bb_lower']) / (bb_mid + 1e-9)
+        data['bb_pos']     = (c - data['bb_lower']) / (data['bb_upper'] - data['bb_lower'] + 1e-9)
+        data['sig_bb']     = np.where(c < data['bb_lower'], 1,
+                              np.where(c > data['bb_upper'], -1, 0))
+        data['bb_squeeze'] = (data['bb_width'] < data['bb_width'].rolling(50).mean()).astype(int)
+
+        # ── Strategy 6: Stochastic ────────────────────────────────────────
+        low14  = l.rolling(14).min()
+        high14 = h.rolling(14).max()
+        data['stoch_k']     = 100 * (c - low14) / (high14 - low14 + 1e-9)
+        data['stoch_d']     = data['stoch_k'].rolling(3).mean()
+        data['sig_stoch']   = np.where(data['stoch_k'] < 20, 1,
+                               np.where(data['stoch_k'] > 80, -1, 0))
+        data['stoch_cross'] = np.where(data['stoch_k'] > data['stoch_d'], 1, -1)
+
+        # ── Strategy 7: Breakout ──────────────────────────────────────────
+        data['high_20'] = h.rolling(20).max().shift(1)
+        data['low_20']  = l.rolling(20).min().shift(1)
+        data['high_50'] = h.rolling(50).max().shift(1)
+        data['low_50']  = l.rolling(50).min().shift(1)
+        data['sig_breakout_20'] = np.where(c > data['high_20'], 1,
+                                   np.where(c < data['low_20'], -1, 0))
+        data['sig_breakout_50'] = np.where(c > data['high_50'], 1,
+                                   np.where(c < data['low_50'], -1, 0))
+        data['price_vs_high20'] = (c - data['high_20']) / (data['high_20'] + 1e-9)
+
+        # ── Strategy 8: Mean Reversion ────────────────────────────────────
+        data['deviation_ma20'] = (c - data['ma_20']) / (data['ma_20'] + 1e-9)
+        data['deviation_ma50'] = (c - data['ma_50']) / (data['ma_50'] + 1e-9)
+        data['zscore_20']      = (c - c.rolling(20).mean()) / (c.rolling(20).std() + 1e-9)
+        data['zscore_50']      = (c - c.rolling(50).mean()) / (c.rolling(50).std() + 1e-9)
+        data['sig_mean_rev']   = np.where(data['zscore_20'] < -1.5, 1,
+                                  np.where(data['zscore_20'] >  1.5, -1, 0))
+
+        # ── Strategy 9: ATR & Volatility ──────────────────────────────────
+        tr = pd.concat([h - l,
+                        (h - c.shift()).abs(),
+                        (l - c.shift()).abs()], axis=1).max(axis=1)
+        data['atr_14']        = tr.rolling(14).mean()
+        data['atr_pct']       = data['atr_14'] / (c + 1e-9)
+        data['volatility_20'] = c.pct_change().rolling(20).std()
+        data['volatility_50'] = c.pct_change().rolling(50).std()
+        data['vol_ratio']     = data['volatility_20'] / (data['volatility_50'] + 1e-9)
+
+        # ── Strategy 10: SMC/ICT + Session + Price Action ─────────────────
+        data['hh'] = (h > h.shift(1)).astype(int)
+        data['ll'] = (l < l.shift(1)).astype(int)
+        data['hl'] = (l > l.shift(1)).astype(int)
+        data['lh'] = (h < h.shift(1)).astype(int)
+
+        data['fvg_bull'] = np.where(l > h.shift(2), 1, 0)
+        data['fvg_bear'] = np.where(h < l.shift(2), 1, 0)
+
+        hour = data.index.hour
+        data['is_london']   = ((hour >= 7)  & (hour < 16)).astype(int)
+        data['is_ny']       = ((hour >= 13) & (hour < 22)).astype(int)
+        data['sin_hour']    = np.sin(2 * np.pi * hour / 24)
+        data['cos_hour']    = np.cos(2 * np.pi * hour / 24)
+        data['day_of_week'] = data.index.dayofweek
+
+        # Price Action
+        data['returns_1']  = c.pct_change(1)
+        data['returns_5']  = c.pct_change(5)
+        data['returns_10'] = c.pct_change(10)
+        data['returns_20'] = c.pct_change(20)
+        data['body_size']  = abs(c - o) / (h - l + 1e-9)
+        data['upper_wick'] = (h - np.maximum(c, o)) / (h - l + 1e-9)
+        data['lower_wick'] = (np.minimum(c, o) - l) / (h - l + 1e-9)
+        data['is_bullish'] = (c > o).astype(int)
+
+        # Volume
+        data['vol_ma_20']    = v.rolling(20).mean()
+        data['vol_ratio_20'] = v / (data['vol_ma_20'] + 1e-9)
+        data['obv']          = (np.sign(c.diff()) * v).cumsum()
+        data['obv_ma']       = data['obv'].rolling(20).mean()
+        data['sig_obv']      = np.where(data['obv'] > data['obv_ma'], 1, -1)
+
+        # ── Target ────────────────────────────────────────────────────────
         future_returns = data[target_col].pct_change(prediction_horizon).shift(-prediction_horizon)
-        
-        # Classification target: 1 if price goes up, 0 if down
         data['target_class'] = (future_returns > 0).astype(int)
-        
-        # Regression target: actual returns
-        data['target_reg'] = future_returns
-        
-        # Drop NaN values
+        data['target_reg']   = future_returns
+
         data = data.dropna()
-        
-        # Select feature columns (exclude target and non-feature columns)
+
         exclude_cols = ['target_class', 'target_reg', 'open', 'high', 'low', 'close', 'volume']
         feature_cols = [col for col in data.columns if col not in exclude_cols]
-        
         self.feature_names = feature_cols
-        
-        X = data[feature_cols]
+
+        X       = data[feature_cols]
         y_class = data['target_class']
-        y_reg = data['target_reg']
-        
+        y_reg   = data['target_reg']
+
+        logger.info("Features created: %d features, %d rows", len(feature_cols), len(data))
         return X, y_class, y_reg, data
-    
+
     def scale_features(self, X_train: pd.DataFrame, X_test: Optional[pd.DataFrame] = None) -> Tuple[np.ndarray, Optional[np.ndarray]]:
         """Scale features using StandardScaler"""
         X_train_scaled = self.scaler.fit_transform(X_train)
-        
         if X_test is not None:
-            X_test_scaled = self.scaler.transform(X_test)
-            return X_train_scaled, X_test_scaled
-        
+            return X_train_scaled, self.scaler.transform(X_test)
         return X_train_scaled, None
-    
+
     def save_scaler(self, filepath: str):
         """Save fitted scaler"""
         joblib.dump(self.scaler, filepath)
-    
+
     def load_scaler(self, filepath: str):
         """Load fitted scaler"""
         self.scaler = joblib.load(filepath)
-    
+
+    # ── Keep static helpers for backward compatibility ─────────────────
     @staticmethod
     def _calculate_rsi(prices: pd.Series, period: int = 14) -> pd.Series:
-        """Calculate RSI"""
-        delta = prices.diff()
-        gain = delta.where(delta > 0, 0)
-        loss = -delta.where(delta < 0, 0)
-        
+        delta    = prices.diff()
+        gain     = delta.where(delta > 0, 0)
+        loss     = -delta.where(delta < 0, 0)
         avg_gain = gain.ewm(alpha=1/period, adjust=False).mean()
         avg_loss = loss.ewm(alpha=1/period, adjust=False).mean()
-        
-        rs = avg_gain / avg_loss
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
-    
+        rs  = avg_gain / avg_loss
+        return 100 - (100 / (1 + rs))
+
     @staticmethod
     def _calculate_atr(data: pd.DataFrame, period: int = 14) -> pd.Series:
-        """Calculate Average True Range"""
-        high = data['high']
-        low = data['low']
-        close = data['close']
-        
-        tr1 = high - low
-        tr2 = abs(high - close.shift(1))
-        tr3 = abs(low - close.shift(1))
-        
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        atr = tr.ewm(alpha=1/period, adjust=False).mean()
-        return atr
-    
+        high, low, close = data['high'], data['low'], data['close']
+        tr = pd.concat([high - low,
+                        abs(high - close.shift(1)),
+                        abs(low  - close.shift(1))], axis=1).max(axis=1)
+        return tr.ewm(alpha=1/period, adjust=False).mean()
+
     @staticmethod
     def _calculate_obv(data: pd.DataFrame) -> pd.Series:
-        """Calculate On Balance Volume"""
-        obv = pd.Series(index=data.index, dtype=float)
-        obv.iloc[0] = data['volume'].iloc[0]
-        
-        for i in range(1, len(data)):
-            if data['close'].iloc[i] > data['close'].iloc[i-1]:
-                obv.iloc[i] = obv.iloc[i-1] + data['volume'].iloc[i]
-            elif data['close'].iloc[i] < data['close'].iloc[i-1]:
-                obv.iloc[i] = obv.iloc[i-1] - data['volume'].iloc[i]
-            else:
-                obv.iloc[i] = obv.iloc[i-1]
-        
-        return obv
+        return (np.sign(data['close'].diff()) * data['volume']).cumsum()
 
 
 class LSTMModel:

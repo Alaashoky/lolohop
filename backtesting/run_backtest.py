@@ -350,6 +350,9 @@ def run_full_backtest():
                 initial_balance=INITIAL_BALANCE,
                 position_size_pct=POSITION_SIZE_PCT,
                 commission_pct=COMMISSION_PCT,
+                atr_sl_mult=1.5,
+                atr_tp_mult=2.5,
+                use_atr_stops=True,
             )
             result = engine.run_backtest(data, signals)
 
@@ -369,6 +372,14 @@ def run_full_backtest():
             print(f"  🔄 عدد الصفقات:        {result.total_trades:>12}")
             print(f"  📉 أقصى سحب:           {result.max_drawdown*100:>11.2f}%")
             print(f"  📊 Sharpe Ratio:       {result.sharpe_ratio:>12.3f}")
+            print(f"  💎 Profit Factor:      {result.profit_factor:>12.3f}")
+            if result.trades:
+                tp_count  = sum(1 for t in result.trades if t.get("exit_reason") == "TP")
+                sl_count  = sum(1 for t in result.trades if t.get("exit_reason") == "SL")
+                sig_count = sum(1 for t in result.trades if t.get("exit_reason") == "signal")
+                print(f"  🎯 TP hits:            {tp_count:>12}")
+                print(f"  🛑 SL hits:            {sl_count:>12}")
+                print(f"  🔄 Signal exits:       {sig_count:>12}")
 
             # Monte Carlo
             mc = engine.monte_carlo_analysis(n_simulations=1000)

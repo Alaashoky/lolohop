@@ -6,6 +6,7 @@ HOPEFX — Backtest Runner
 
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 import logging
@@ -24,7 +25,7 @@ SYMBOL         = "XAUUSD.m"
 BACKTEST_START = datetime(2024, 1, 1)
 BACKTEST_END   = datetime(2026, 1, 1)
 TIMEFRAME_STR  = "1h"
-MODEL_DIR        = "ml/saved_models/XAUUSDm"
+MODEL_DIR        = "ml/models"
 INITIAL_BALANCE  = 10_000.0
 POSITION_SIZE_PCT = 0.10
 COMMISSION_PCT    = 0.0002
@@ -225,27 +226,45 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
 
 # ── Step 3: تحميل الموديل والـ Scaler ────────────────────────────────────────
 def load_model(model_dir: str, model_name: str):
-    if model_name == "xgboost":
-        try:
-            from xgboost import XGBClassifier
+    """Load model from ml/models/ directory"""
+    model_files = {
+        "LogisticRegression": "LogisticRegression.pkl",
+        "XGBoost": "XGBoost.pkl",
+        "RandomForest": "RandomForest.pkl",
+        "GradientBoosting": "GradientBoosting.pkl",
+    }
+    filename = model_files.get(model_name)
+    if filename is None:
+        raise ValueError(
+            f"Unknown model: {model_name}. Available: {list(model_files.keys())}"
+        )
 
-            model = XGBClassifier()
-            model.load_model(os.path.join(model_dir, "xgboost_model.json"))
-            return model
-        except Exception as e:
-            raise RuntimeError(f"Failed to load XGBoost: {e}")
-    elif model_name == "random_forest":
-        return joblib.load(os.path.join(model_dir, "random_forest_model.pkl"))
-    else:
-        raise ValueError(f"Unknown model: {model_name}")
+    filepath = os.path.join(model_dir, filename)
+    if not Path(filepath).exists():
+        raise FileNotFoundError(f"Model file not found: {filepath}")
+
+    return joblib.load(filepath)
 
 
 def load_scaler(model_dir: str):
-    scaler_path = os.path.join(model_dir, "feature_scaler.pkl")
+    scaler_path = os.path.join(model_dir, "scaler.pkl")
     if not Path(scaler_path).exists():
-        logger.warning("Scaler not found — features will not be scaled")
+        logger.warning("Scaler not found at %s", scaler_path)
         return None
-    return joblib.load(scaler_path)
+    scaler = joblib.load(scaler_path)
+    logger.info("Scaler loaded from %s", scaler_path)
+    return scaler
+
+
+def load_feature_cols(model_dir: str) -> list:
+    """Load the exact feature columns used during training"""
+    path = os.path.join(model_dir, "feature_cols.pkl")
+    if Path(path).exists():
+        cols = joblib.load(path)
+        logger.info("Feature columns loaded: %d features", len(cols))
+        return cols
+    logger.warning("feature_cols.pkl not found — using all available features")
+    return None
 
 
 # ── Step 4: توليد الـ Signals ─────────────────────────────────────────────────
@@ -255,12 +274,15 @@ def generate_signals(
     scaler,
     feature_cols: list,
 ) -> pd.Series:
-    # استخدام نفس الـ feature columns اللي اتدرب عليها الموديل
     available = [f for f in feature_cols if f in data_with_features.columns]
-    X = data_with_features[available].values
+    missing = [f for f in feature_cols if f not in data_with_features.columns]
+    if missing:
+        logger.warning("Missing %d features: %s", len(missing), missing[:5])
+
+    X = data_with_features[available]  # keep as DataFrame to preserve feature names
 
     if scaler is not None:
-        X = scaler.transform(X)
+        X = pd.DataFrame(scaler.transform(X), columns=available, index=data_with_features.index)
 
     predictions = model.predict(X)
     # تحويل: 1 = buy signal, 0 = no signal / sell
@@ -273,6 +295,11 @@ def generate_signals(
 
 # ── Step 5: تشغيل الـ Backtest ────────────────────────────────────────────────
 def run_full_backtest():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model-dir", default=MODEL_DIR)
+    args = parser.parse_args()
+    model_dir = args.model_dir
+
     # إضافة project root للـ path
     project_root = Path(__file__).parent.parent
     sys.path.insert(0, str(project_root))
@@ -299,16 +326,21 @@ def run_full_backtest():
     feature_cols = [c for c in data.columns if c not in exclude_cols]
 
     # 3. تحميل الـ Scaler
-    scaler = load_scaler(MODEL_DIR)
+    scaler = load_scaler(model_dir)
+
+    # تحميل feature_cols المحفوظة من التدريب (لضمان نفس الـ features)
+    saved_feature_cols = load_feature_cols(model_dir)
+    if saved_feature_cols:
+        feature_cols = saved_feature_cols
 
     # 4. تشغيل الـ backtest لكل موديل
-    models_to_test = ["xgboost", "random_forest"]
+    models_to_test = ["LogisticRegression", "XGBoost", "RandomForest", "GradientBoosting"]
     all_results = {}
 
     for model_name in models_to_test:
         try:
             logger.info("Loading %s model...", model_name)
-            model = load_model(MODEL_DIR, model_name)
+            model = load_model(model_dir, model_name)
 
             # توليد الـ signals
             signals = generate_signals(data, model, scaler, feature_cols)

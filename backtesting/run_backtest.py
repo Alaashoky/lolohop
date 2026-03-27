@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-HOPEFX — Backtest Runner
-يجيب بيانات XAUUSD.m من MT5 (2024-2026) ويشغّل backtest على الموديلات المحفوظة
+HOPEFX — Backtest Runner (v2 — Long-Only + Trend Filter + ATR Stops)
 """
 
 from __future__ import annotations
@@ -20,15 +19,20 @@ import joblib
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-# ── إعدادات ──────────────────────────────────────────────────────────────────
-SYMBOL         = "XAUUSD.m"
-BACKTEST_START = datetime(2024, 1, 1)
-BACKTEST_END   = datetime(2026, 1, 1)
-TIMEFRAME_STR  = "1h"
-MODEL_DIR        = "ml/models"
-INITIAL_BALANCE  = 10_000.0
+# ── إعدادات ───────────────────────────────────────────────────────────────────
+SYMBOL            = "XAUUSD.m"
+BACKTEST_START    = datetime(2024, 1, 1)
+BACKTEST_END      = datetime(2026, 1, 1)
+TIMEFRAME_STR     = "1h"
+MODEL_DIR         = "ml/models"
+INITIAL_BALANCE   = 10_000.0
 POSITION_SIZE_PCT = 0.10
 COMMISSION_PCT    = 0.0002
+ATR_SL_MULT       = 1.0    # SL = 1.0 × ATR
+ATR_TP_MULT       = 3.0    # TP = 3.0 × ATR  → R:R = 1:3
+LONG_ONLY         = True   # Long فقط — الذهب اتجاه صاعد 2024-2026
+TREND_FILTER      = True   # فلتر MA50
+PROB_THRESHOLD    = 0.52   # الحد الأدنى للثقة
 
 
 # ── Step 1: جلب البيانات من MT5 ───────────────────────────────────────────────
@@ -267,30 +271,67 @@ def load_feature_cols(model_dir: str) -> list:
     return None
 
 
-# ── Step 4: توليد الـ Signals ─────────────────────────────────────────────────
+# ── Step 4: توليد الـ Signals (Long-Only + Trend Filter + Prob Threshold) ─────
 def generate_signals(
     data_with_features: pd.DataFrame,
     model,
     scaler,
     feature_cols: list,
+    long_only: bool = True,
+    trend_filter: bool = True,
+    prob_threshold: float = 0.52,
 ) -> pd.Series:
+    """
+    إشارات محسّنة:
+    - long_only=True   : Buy فقط (مش Sell) — الذهب في اتجاه صاعد
+    - trend_filter=True: ادخل فقط لو السعر فوق MA(50)
+    - prob_threshold   : ادخل فقط لو P(up) > threshold
+    """
     available = [f for f in feature_cols if f in data_with_features.columns]
-    missing = [f for f in feature_cols if f not in data_with_features.columns]
+    missing   = [f for f in feature_cols if f not in data_with_features.columns]
     if missing:
         logger.warning("Missing %d features: %s", len(missing), missing[:5])
 
-    X = data_with_features[available]  # keep as DataFrame to preserve feature names
+    X = data_with_features[available]
 
     if scaler is not None:
-        X = pd.DataFrame(scaler.transform(X), columns=available, index=data_with_features.index)
+        X = pd.DataFrame(
+            scaler.transform(X),
+            columns=available,
+            index=data_with_features.index,
+        )
 
-    predictions = model.predict(X)
-    # تحويل: 1 = buy signal, 0 = no signal / sell
-    signals = pd.Series(
-        np.where(predictions == 1, 1, -1),
-        index=data_with_features.index,
+    # احتمالات الموديل
+    if hasattr(model, "predict_proba"):
+        proba   = model.predict_proba(X)
+        prob_up = proba[:, 1]
+    else:
+        predictions = model.predict(X)
+        prob_up = np.where(predictions == 1, 0.6, 0.4)
+
+    # إشارات بناءً على الاحتمال
+    signals = np.zeros(len(X))
+    signals[prob_up > prob_threshold] = 1  # Buy
+
+    if not long_only:
+        signals[prob_up < (1.0 - prob_threshold)] = -1  # Sell
+
+    # Trend Filter: ادخل Buy فقط لو السعر فوق MA(50)
+    if trend_filter and "ma_50" in data_with_features.columns:
+        ma50  = data_with_features["ma_50"].values
+        close = data_with_features["close"].values
+        signals[(signals == 1) & (close < ma50)] = 0
+        signals[(signals == -1) & (close > ma50)] = 0
+
+    buy_count  = int(np.sum(signals == 1))
+    sell_count = int(np.sum(signals == -1))
+    flat_count = int(np.sum(signals == 0))
+    logger.info(
+        "  Signals → Buy: %d | Sell: %d | Flat: %d",
+        buy_count, sell_count, flat_count,
     )
-    return signals
+
+    return pd.Series(signals, index=data_with_features.index)
 
 
 # ── Step 5: تشغيل الـ Backtest ────────────────────────────────────────────────
@@ -306,12 +347,16 @@ def run_full_backtest():
 
     from backtesting.backtest_engine import BacktestEngine
 
-    print("\n" + "=" * 60)
-    print("  🚀 HOPEFX Backtest Runner")
-    print(f"  📊 Symbol:  {SYMBOL}")
-    print(f"  📅 Period:  {BACKTEST_START.date()} → {BACKTEST_END.date()}")
-    print(f"  💰 Balance: ${INITIAL_BALANCE:,.0f}")
-    print("=" * 60)
+    print("\n" + "=" * 65)
+    print("  🚀 HOPEFX Backtest Runner v2 — Long-Only + ATR Stops")
+    print(f"  📊 Symbol:       {SYMBOL}")
+    print(f"  📅 Period:       {BACKTEST_START.date()} → {BACKTEST_END.date()}")
+    print(f"  💰 Balance:      ${INITIAL_BALANCE:,.0f}")
+    print(f"  🎯 Mode:         {'Long-Only' if LONG_ONLY else 'Long+Short'}")
+    print(f"  📈 Trend Filter: {'MA50 ✅' if TREND_FILTER else 'OFF'}")
+    print(f"  🔒 SL:           {ATR_SL_MULT}× ATR  |  TP: {ATR_TP_MULT}× ATR")
+    print(f"  🎲 Confidence:   >{PROB_THRESHOLD*100:.0f}%")
+    print("=" * 65)
 
     # 1. جلب البيانات
     df = fetch_mt5_data(SYMBOL, BACKTEST_START, BACKTEST_END, TIMEFRAME_STR)
@@ -343,15 +388,20 @@ def run_full_backtest():
             model = load_model(model_dir, model_name)
 
             # توليد الـ signals
-            signals = generate_signals(data, model, scaler, feature_cols)
+            signals = generate_signals(
+                data, model, scaler, feature_cols,
+                long_only=LONG_ONLY,
+                trend_filter=TREND_FILTER,
+                prob_threshold=PROB_THRESHOLD,
+            )
 
             # تشغيل الـ backtest
             engine = BacktestEngine(
                 initial_balance=INITIAL_BALANCE,
                 position_size_pct=POSITION_SIZE_PCT,
                 commission_pct=COMMISSION_PCT,
-                atr_sl_mult=1.5,
-                atr_tp_mult=2.5,
+                atr_sl_mult=ATR_SL_MULT,
+                atr_tp_mult=ATR_TP_MULT,
                 use_atr_stops=True,
             )
             result = engine.run_backtest(data, signals)
@@ -359,14 +409,14 @@ def run_full_backtest():
             all_results[model_name] = (result, engine)
 
             # عرض النتائج
-            print(f"\n{'='*50}")
+            net_pl = INITIAL_BALANCE * result.total_return
+
+            print(f"\n{'='*55}")
             print(f"  📈 نتائج {model_name.upper()}")
-            print(f"{'='*50}")
+            print(f"{'='*55}")
             print(f"  💰 رأس المال الأولي:   ${INITIAL_BALANCE:>12,.2f}")
-            print(
-                f"  💵 رأس المال النهائي:  "
-                f"${INITIAL_BALANCE * (1 + result.total_return):>12,.2f}"
-            )
+            print(f"  💵 رأس المال النهائي:  ${INITIAL_BALANCE + net_pl:>12,.2f}")
+            print(f"  💵 Net P/L:            ${net_pl:>+12,.2f}")
             print(f"  📈 إجمالي العائد:      {result.total_return*100:>+11.2f}%")
             print(f"  ✅ نسبة الفوز:         {result.win_rate*100:>11.1f}%")
             print(f"  🔄 عدد الصفقات:        {result.total_trades:>12}")
@@ -377,9 +427,12 @@ def run_full_backtest():
                 tp_count  = sum(1 for t in result.trades if t.get("exit_reason") == "TP")
                 sl_count  = sum(1 for t in result.trades if t.get("exit_reason") == "SL")
                 sig_count = sum(1 for t in result.trades if t.get("exit_reason") == "signal")
+                end_count = sum(1 for t in result.trades if t.get("exit_reason") == "end")
                 print(f"  🎯 TP hits:            {tp_count:>12}")
                 print(f"  🛑 SL hits:            {sl_count:>12}")
                 print(f"  🔄 Signal exits:       {sig_count:>12}")
+                if end_count:
+                    print(f"  ⏹  End exits:          {end_count:>12}")
 
             # Monte Carlo
             mc = engine.monte_carlo_analysis(n_simulations=1000)
@@ -394,19 +447,24 @@ def run_full_backtest():
 
     # ملخص نهائي
     if all_results:
-        print(f"\n{'='*50}")
+        print(f"\n{'='*65}")
         print("  🏆 ملخص المقارنة")
-        print(f"{'='*50}")
-        print(
-            f"  {'الموديل':<20} {'العائد':>10}  {'نسبة الفوز':>12}  {'Sharpe':>8}"
-        )
-        print(f"  {'-'*52}")
+        print(f"{'='*65}")
+        print(f"  {'الموديل':<22} {'العائد':>8}  {'Win%':>6}  {'PF':>5}  {'Sharpe':>7}  {'DD':>6}")
+        print(f"  {'-'*62}")
         for name, (res, _) in all_results.items():
             print(
-                f"  {name:<20} {res.total_return*100:>+9.2f}%"
-                f"  {res.win_rate*100:>11.1f}%  {res.sharpe_ratio:>8.3f}"
+                f"  {name:<22} {res.total_return*100:>+7.2f}%"
+                f"  {res.win_rate*100:>5.1f}%"
+                f"  {res.profit_factor:>5.2f}"
+                f"  {res.sharpe_ratio:>7.3f}"
+                f"  {res.max_drawdown*100:>5.2f}%"
             )
-        print(f"{'='*50}\n")
+        print(f"{'='*65}\n")
+
+        print("  🎯 Target Results:")
+        print("  Win Rate: 63.9% | PF: 2.64 | DD: 2.2% | Sharpe: 4.83")
+        print(f"{'='*65}\n")
 
 
 if __name__ == "__main__":

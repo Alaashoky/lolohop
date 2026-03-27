@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-HOPEFX — Backtest Runner (v2 — Long-Only + Trend Filter + ATR Stops)
+HOPEFX — Backtest Runner v3 — Hyper-Filtered Signals
 """
 
 from __future__ import annotations
@@ -28,11 +28,16 @@ MODEL_DIR         = "ml/models"
 INITIAL_BALANCE   = 10_000.0
 POSITION_SIZE_PCT = 0.10
 COMMISSION_PCT    = 0.0002
-ATR_SL_MULT       = 1.0    # SL = 1.0 × ATR
-ATR_TP_MULT       = 3.0    # TP = 3.0 × ATR  → R:R = 1:3
-LONG_ONLY         = True   # Long فقط — الذهب اتجاه صاعد 2024-2026
-TREND_FILTER      = True   # فلتر MA50
-PROB_THRESHOLD    = 0.52   # الحد الأدنى للثقة
+
+# ── Signal Quality Filters ────────────────────────────────────────────────────
+PROB_THRESHOLD    = 0.65   # ← رفعناه من 0.52 → 0.65
+ATR_SL_MULT       = 1.0
+ATR_TP_MULT       = 3.0
+LONG_ONLY         = True
+TREND_FILTER      = True   # MA50 filter
+SESSION_FILTER    = True   # London + NY only
+ATR_FILTER        = True   # Volatility filter
+CONSEC_CONFIRM    = True   # 2 consecutive bars
 
 
 # ── Step 1: جلب البيانات من MT5 ───────────────────────────────────────────────
@@ -88,7 +93,7 @@ def fetch_mt5_data(
     return df
 
 
-# ── Step 2: حساب الـ Features (نفس الـ 79 Feature اللي اتدرب عليها الموديل) ──
+# ── Step 2: حساب الـ Features ─────────────────────────────────────────────────
 def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
     data = df.copy()
     c = data["close"]
@@ -228,25 +233,20 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
     return data.dropna()
 
 
-# ── Step 3: تحميل الموديل والـ Scaler ────────────────────────────────────────
+# ── Step 3: تحميل الموديل والـ Scaler ─────────────────────────────────────────
 def load_model(model_dir: str, model_name: str):
-    """Load model from ml/models/ directory"""
     model_files = {
         "LogisticRegression": "LogisticRegression.pkl",
-        "XGBoost": "XGBoost.pkl",
-        "RandomForest": "RandomForest.pkl",
-        "GradientBoosting": "GradientBoosting.pkl",
+        "XGBoost":            "XGBoost.pkl",
+        "RandomForest":       "RandomForest.pkl",
+        "GradientBoosting":   "GradientBoosting.pkl",
     }
     filename = model_files.get(model_name)
     if filename is None:
-        raise ValueError(
-            f"Unknown model: {model_name}. Available: {list(model_files.keys())}"
-        )
-
+        raise ValueError(f"Unknown model: {model_name}.")
     filepath = os.path.join(model_dir, filename)
     if not Path(filepath).exists():
         raise FileNotFoundError(f"Model file not found: {filepath}")
-
     return joblib.load(filepath)
 
 
@@ -261,7 +261,6 @@ def load_scaler(model_dir: str):
 
 
 def load_feature_cols(model_dir: str) -> list:
-    """Load the exact feature columns used during training"""
     path = os.path.join(model_dir, "feature_cols.pkl")
     if Path(path).exists():
         cols = joblib.load(path)
@@ -271,7 +270,7 @@ def load_feature_cols(model_dir: str) -> list:
     return None
 
 
-# ── Step 4: توليد الـ Signals (Long-Only + Trend Filter + Prob Threshold) ─────
+# ── Step 4: توليد الـ Signals (Hyper-Filtered v3) ─────────────────────────────
 def generate_signals(
     data_with_features: pd.DataFrame,
     model,
@@ -279,13 +278,18 @@ def generate_signals(
     feature_cols: list,
     long_only: bool = True,
     trend_filter: bool = True,
-    prob_threshold: float = 0.52,
+    session_filter: bool = True,
+    atr_filter: bool = True,
+    consec_confirm: bool = True,
+    prob_threshold: float = 0.65,
 ) -> pd.Series:
     """
-    إشارات محسّنة:
-    - long_only=True   : Buy فقط (مش Sell) — الذهب في اتجاه صاعد
-    - trend_filter=True: ادخل فقط لو السعر فوق MA(50)
-    - prob_threshold   : ادخل فقط لو P(up) > threshold
+    Hyper-Filtered Signals v3:
+    1. prob_threshold=0.65  : ادخل فقط لو الموديل واثق 65%+
+    2. trend_filter         : السعر فوق MA(50)
+    3. session_filter       : London (7-16) أو NY (13-22) فقط
+    4. atr_filter           : ATR بين 30th و 85th percentile
+    5. consec_confirm       : لازم bar السابق كان buy signal أيضاً
     """
     available = [f for f in feature_cols if f in data_with_features.columns]
     missing   = [f for f in feature_cols if f not in data_with_features.columns]
@@ -309,26 +313,51 @@ def generate_signals(
         predictions = model.predict(X)
         prob_up = np.where(predictions == 1, 0.6, 0.4)
 
-    # إشارات بناءً على الاحتمال
+    # ── الفلتر 1: Probability Threshold ──────────────────────────────
     signals = np.zeros(len(X))
-    signals[prob_up > prob_threshold] = 1  # Buy
+    signals[prob_up > prob_threshold] = 1
 
     if not long_only:
-        signals[prob_up < (1.0 - prob_threshold)] = -1  # Sell
+        signals[prob_up < (1.0 - prob_threshold)] = -1
 
-    # Trend Filter: ادخل Buy فقط لو السعر فوق MA(50)
+    n = len(signals)
+    close = data_with_features["close"].values
+    hour  = data_with_features.index.hour
+
+    # ── الفلتر 2: Trend Filter (MA50) ────────────────────────────────
     if trend_filter and "ma_50" in data_with_features.columns:
-        ma50  = data_with_features["ma_50"].values
-        close = data_with_features["close"].values
+        ma50 = data_with_features["ma_50"].values
         signals[(signals == 1) & (close < ma50)] = 0
         signals[(signals == -1) & (close > ma50)] = 0
 
+    # ── الفلتر 3: Session Filter (London + NY) ───────────────────────
+    if session_filter:
+        valid_hours = ((hour >= 7) & (hour < 16)) | ((hour >= 13) & (hour < 22))
+        signals[~valid_hours] = 0
+
+    # ── الفلتر 4: ATR Volatility Filter ──────────────────────────────
+    if atr_filter and "atr_14" in data_with_features.columns:
+        atr = data_with_features["atr_14"].values
+        atr_p30 = float(np.percentile(atr[atr > 0], 30))
+        atr_p85 = float(np.percentile(atr[atr > 0], 85))
+        invalid_atr = (atr < atr_p30) | (atr > atr_p85)
+        signals[(signals != 0) & invalid_atr] = 0
+
+    # ── الفلتر 5: Consecutive Confirmation ───────────────────────────
+    if consec_confirm:
+        # Signal valid only if previous bar also had prob > threshold
+        raw_buy = (prob_up > prob_threshold).astype(int)
+        consec_invalid = np.where((signals[1:] == 1) & (raw_buy[:-1] == 0))[0] + 1
+        signals[consec_invalid] = 0
+
+    # ── إحصائيات ─────────────────────────────────────────────────────
     buy_count  = int(np.sum(signals == 1))
     sell_count = int(np.sum(signals == -1))
     flat_count = int(np.sum(signals == 0))
     logger.info(
-        "  Signals → Buy: %d | Sell: %d | Flat: %d",
+        "  Signals → Buy: %d | Sell: %d | Flat: %d  (%.1f%% active)",
         buy_count, sell_count, flat_count,
+        (buy_count + sell_count) / n * 100,
     )
 
     return pd.Series(signals, index=data_with_features.index)
@@ -337,25 +366,40 @@ def generate_signals(
 # ── Step 5: تشغيل الـ Backtest ────────────────────────────────────────────────
 def run_full_backtest():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model-dir", default=MODEL_DIR)
+    parser.add_argument("--model-dir",      default=MODEL_DIR)
+    parser.add_argument("--prob-threshold", type=float, default=PROB_THRESHOLD)
+    parser.add_argument("--atr-sl",         type=float, default=ATR_SL_MULT)
+    parser.add_argument("--atr-tp",         type=float, default=ATR_TP_MULT)
+    parser.add_argument("--no-session",     action="store_true")
+    parser.add_argument("--no-atr-filter",  action="store_true")
+    parser.add_argument("--no-consec",      action="store_true")
     args = parser.parse_args()
-    model_dir = args.model_dir
 
-    # إضافة project root للـ path
+    model_dir      = args.model_dir
+    prob_threshold = args.prob_threshold
+    atr_sl         = args.atr_sl
+    atr_tp         = args.atr_tp
+    use_session    = not args.no_session
+    use_atr_filt   = not args.no_atr_filter
+    use_consec     = not args.no_consec
+
     project_root = Path(__file__).parent.parent
     sys.path.insert(0, str(project_root))
 
     from backtesting.backtest_engine import BacktestEngine
 
     print("\n" + "=" * 65)
-    print("  🚀 HOPEFX Backtest Runner v2 — Long-Only + ATR Stops")
+    print("  🚀 HOPEFX Backtest Runner v3 — Hyper-Filtered Signals")
     print(f"  📊 Symbol:       {SYMBOL}")
     print(f"  📅 Period:       {BACKTEST_START.date()} → {BACKTEST_END.date()}")
     print(f"  💰 Balance:      ${INITIAL_BALANCE:,.0f}")
-    print(f"  🎯 Mode:         {'Long-Only' if LONG_ONLY else 'Long+Short'}")
-    print(f"  📈 Trend Filter: {'MA50 ✅' if TREND_FILTER else 'OFF'}")
-    print(f"  🔒 SL:           {ATR_SL_MULT}× ATR  |  TP: {ATR_TP_MULT}× ATR")
-    print(f"  🎲 Confidence:   >{PROB_THRESHOLD*100:.0f}%")
+    print(f"  🎯 Mode:         Long-Only")
+    print(f"  📈 Trend Filter: MA50 ✅")
+    print(f"  🕐 Session:      {'London+NY ✅' if use_session else 'ALL'}")
+    print(f"  📊 ATR Filter:   {'30th-85th pct ✅' if use_atr_filt else 'OFF'}")
+    print(f"  🔁 Consec Conf:  {'2 bars ✅' if use_consec else 'OFF'}")
+    print(f"  🎲 Confidence:   >{prob_threshold*100:.0f}%")
+    print(f"  🔒 SL:           {atr_sl}× ATR  |  TP: {atr_tp}× ATR  (R:R = 1:{atr_tp/atr_sl:.1f})")
     print("=" * 65)
 
     # 1. جلب البيانات
@@ -366,49 +410,43 @@ def run_full_backtest():
     data = calculate_features(df)
     logger.info("  %d rows with features ready", len(data))
 
-    # تحديد الـ feature columns
-    exclude_cols = ["open", "high", "low", "close", "volume"]
-    feature_cols = [c for c in data.columns if c not in exclude_cols]
+    exclude_cols    = ["open", "high", "low", "close", "volume"]
+    feature_cols    = [c for c in data.columns if c not in exclude_cols]
+    scaler          = load_scaler(model_dir)
+    saved_feat_cols = load_feature_cols(model_dir)
+    if saved_feat_cols:
+        feature_cols = saved_feat_cols
 
-    # 3. تحميل الـ Scaler
-    scaler = load_scaler(model_dir)
-
-    # تحميل feature_cols المحفوظة من التدريب (لضمان نفس الـ features)
-    saved_feature_cols = load_feature_cols(model_dir)
-    if saved_feature_cols:
-        feature_cols = saved_feature_cols
-
-    # 4. تشغيل الـ backtest لكل موديل
+    # 3. تشغيل الـ backtest لكل موديل
     models_to_test = ["LogisticRegression", "XGBoost", "RandomForest", "GradientBoosting"]
-    all_results = {}
+    all_results    = {}
 
     for model_name in models_to_test:
         try:
             logger.info("Loading %s model...", model_name)
             model = load_model(model_dir, model_name)
 
-            # توليد الـ signals
             signals = generate_signals(
                 data, model, scaler, feature_cols,
                 long_only=LONG_ONLY,
                 trend_filter=TREND_FILTER,
-                prob_threshold=PROB_THRESHOLD,
+                session_filter=use_session,
+                atr_filter=use_atr_filt,
+                consec_confirm=use_consec,
+                prob_threshold=prob_threshold,
             )
 
-            # تشغيل الـ backtest
             engine = BacktestEngine(
                 initial_balance=INITIAL_BALANCE,
                 position_size_pct=POSITION_SIZE_PCT,
                 commission_pct=COMMISSION_PCT,
-                atr_sl_mult=ATR_SL_MULT,
-                atr_tp_mult=ATR_TP_MULT,
+                atr_sl_mult=atr_sl,
+                atr_tp_mult=atr_tp,
                 use_atr_stops=True,
             )
             result = engine.run_backtest(data, signals)
-
             all_results[model_name] = (result, engine)
 
-            # عرض النتائج
             net_pl = INITIAL_BALANCE * result.total_return
 
             print(f"\n{'='*55}")
@@ -423,18 +461,20 @@ def run_full_backtest():
             print(f"  📉 أقصى سحب:           {result.max_drawdown*100:>11.2f}%")
             print(f"  📊 Sharpe Ratio:       {result.sharpe_ratio:>12.3f}")
             print(f"  💎 Profit Factor:      {result.profit_factor:>12.3f}")
+
             if result.trades:
                 tp_count  = sum(1 for t in result.trades if t.get("exit_reason") == "TP")
                 sl_count  = sum(1 for t in result.trades if t.get("exit_reason") == "SL")
                 sig_count = sum(1 for t in result.trades if t.get("exit_reason") == "signal")
                 end_count = sum(1 for t in result.trades if t.get("exit_reason") == "end")
-                print(f"  🎯 TP hits:            {tp_count:>12}")
-                print(f"  🛑 SL hits:            {sl_count:>12}")
+                tp_rate   = tp_count / result.total_trades * 100 if result.total_trades > 0 else 0
+                sl_rate   = sl_count / result.total_trades * 100 if result.total_trades > 0 else 0
+                print(f"  🎯 TP hits:            {tp_count:>8}  ({tp_rate:.1f}%)")
+                print(f"  🛑 SL hits:            {sl_count:>8}  ({sl_rate:.1f}%)")
                 print(f"  🔄 Signal exits:       {sig_count:>12}")
                 if end_count:
                     print(f"  ⏹  End exits:          {end_count:>12}")
 
-            # Monte Carlo
             mc = engine.monte_carlo_analysis(n_simulations=1000)
             if mc:
                 print(f"\n  🎲 Monte Carlo (1000 simulations):")
@@ -444,26 +484,28 @@ def run_full_backtest():
 
         except Exception as e:
             logger.error("Failed for %s: %s", model_name, e)
+            import traceback; traceback.print_exc()
 
     # ملخص نهائي
     if all_results:
         print(f"\n{'='*65}")
         print("  🏆 ملخص المقارنة")
         print(f"{'='*65}")
-        print(f"  {'الموديل':<22} {'العائد':>8}  {'Win%':>6}  {'PF':>5}  {'Sharpe':>7}  {'DD':>6}")
-        print(f"  {'-'*62}")
+        print(f"  {'الموديل':<22} {'العائد':>8}  {'Win%':>6}  {'PF':>5}  {'Sharpe':>7}  {'DD':>6}  {'#Trades':>8}")
+        print(f"  {'-'*68}")
+        best_model = max(all_results.items(), key=lambda x: x[1][0].profit_factor)
         for name, (res, _) in all_results.items():
+            star = " ⭐" if name == best_model[0] else ""
             print(
                 f"  {name:<22} {res.total_return*100:>+7.2f}%"
                 f"  {res.win_rate*100:>5.1f}%"
                 f"  {res.profit_factor:>5.2f}"
                 f"  {res.sharpe_ratio:>7.3f}"
                 f"  {res.max_drawdown*100:>5.2f}%"
+                f"  {res.total_trades:>8}{star}"
             )
-        print(f"{'='*65}\n")
-
-        print("  🎯 Target Results:")
-        print("  Win Rate: 63.9% | PF: 2.64 | DD: 2.2% | Sharpe: 4.83")
+        print(f"{'='*65}")
+        print(f"\n  🎯 Target:  Win Rate: 63.9% | PF: 2.64 | DD: -2.2% | Sharpe: 4.83")
         print(f"{'='*65}\n")
 
 

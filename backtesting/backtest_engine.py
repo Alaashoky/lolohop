@@ -30,8 +30,8 @@ class BacktestEngine:
     Positions are sized as a fixed fraction of equity (default 10%).
 
     ATR Stops (default):
-        SL = entry_price ± atr_sl_mult × ATR(14)   [default 1.5×]
-        TP = entry_price ± atr_tp_mult × ATR(14)   [default 2.5×]
+        SL = entry_price ± atr_sl_mult × ATR(14)   [default 1.0×]
+        TP = entry_price ± atr_tp_mult × ATR(14)   [default 3.0×]
     """
 
     def __init__(
@@ -39,8 +39,8 @@ class BacktestEngine:
         initial_balance: float = 100_000.0,
         position_size_pct: float = 0.10,
         commission_pct: float = 0.0002,
-        atr_sl_mult: float = 1.5,
-        atr_tp_mult: float = 2.5,
+        atr_sl_mult: float = 1.0,
+        atr_tp_mult: float = 3.0,
         use_atr_stops: bool = True,
     ):
         self.initial_balance   = initial_balance
